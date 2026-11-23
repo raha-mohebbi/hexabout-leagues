@@ -30,3 +30,10 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Docker
+**/.docker-data/
+
+# Database backups
+*.dump
+*.backup
