@@ -115,7 +115,6 @@ describe("Match service", () => {
     expect(result.duplicate).toBe(false);
     expect(result.status).toBe("reported");
 
-    // Check winner's score.
     const scoreResult = await testPool.query(
       `
       SELECT score
@@ -128,7 +127,6 @@ describe("Match service", () => {
 
     expect(scoreResult.rows[0].score).toBe(1);
 
-    // Check score event.
     const eventResult = await testPool.query(
       `
       SELECT COUNT(*)::int AS count
@@ -153,14 +151,10 @@ describe("Match service", () => {
     const firstResult = await reportMatch(input, testPool);
     const secondResult = await reportMatch(input, testPool);
 
-    // Both requests must refer to the same match.
     expect(secondResult.matchId).toBe(firstResult.matchId);
-
-    // The second request must be recognized as a duplicate.
     expect(firstResult.duplicate).toBe(false);
     expect(secondResult.duplicate).toBe(true);
 
-    // The winner must receive only one point.
     const scoreResult = await testPool.query(
       `
       SELECT score
@@ -173,7 +167,6 @@ describe("Match service", () => {
 
     expect(scoreResult.rows[0].score).toBe(1);
 
-    // Only one award event must exist.
     const eventResult = await testPool.query(
       `
       SELECT COUNT(*)::int AS count
@@ -186,94 +179,218 @@ describe("Match service", () => {
 
     expect(eventResult.rows[0].count).toBe(1);
   });
+
+  it("should process concurrent duplicate reports only once", async () => {
+    const input = {
+      externalMatchId: "test-match-concurrent-duplicate",
+      leagueId,
+      winnerId,
+      loserId,
+    };
+
+    const results = await Promise.all([
+      reportMatch(input, testPool),
+      reportMatch(input, testPool),
+    ]);
+
+    expect(results.map((result) => result.duplicate).sort()).toEqual([
+      false,
+      true,
+    ]);
+
+    const scoreResult = await testPool.query(
+      `
+      SELECT score
+      FROM league_members
+      WHERE league_id = $1
+        AND player_id = $2
+      `,
+      [leagueId, winnerId]
+    );
+
+    const matchResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM match_results
+      WHERE external_match_id = $1
+      `,
+      [input.externalMatchId]
+    );
+
+    const eventResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM score_events
+      WHERE player_id = $1
+        AND event_type = 'award'
+      `,
+      [winnerId]
+    );
+
+    expect(scoreResult.rows[0].score).toBe(1);
+    expect(matchResult.rows[0].count).toBe(1);
+    expect(eventResult.rows[0].count).toBe(1);
+  });
+
   it("should reject a match if a player is not a league member", async () => {
-  await expect(
-    reportMatch(
-      {
-        externalMatchId: "test-match-outsider",
-        leagueId,
-        winnerId: outsiderId,
-        loserId,
-      },
-      testPool
-    )
-  ).rejects.toMatchObject({
-    statusCode: 422,
+    await expect(
+      reportMatch(
+        {
+          externalMatchId: "test-match-outsider",
+          leagueId,
+          winnerId: outsiderId,
+          loserId,
+        },
+        testPool
+      )
+    ).rejects.toMatchObject({
+      statusCode: 422,
+    });
+
+    const matchResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM match_results
+      WHERE external_match_id = $1
+      `,
+      ["test-match-outsider"]
+    );
+
+    expect(matchResult.rows[0].count).toBe(0);
+
+    const eventResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM score_events
+      `
+    );
+
+    expect(eventResult.rows[0].count).toBe(0);
   });
 
-  // No match should be recorded.
-  const matchResult = await testPool.query(
-    `
-    SELECT COUNT(*)::int AS count
-    FROM match_results
-    WHERE external_match_id = $1
-    `,
-    ["test-match-outsider"]
-  );
+  it("should reject the same match ID with different data", async () => {
+    const input = {
+      externalMatchId: "test-match-conflict",
+      leagueId,
+      winnerId,
+      loserId,
+    };
 
-  expect(matchResult.rows[0].count).toBe(0);
+    const firstResult = await reportMatch(input, testPool);
 
-  // No score event should be created.
-  const eventResult = await testPool.query(
-    `
-    SELECT COUNT(*)::int AS count
-    FROM score_events
-    `
-  );
+    expect(firstResult.duplicate).toBe(false);
 
-  expect(eventResult.rows[0].count).toBe(0);
-});
+    await expect(
+      reportMatch(
+        {
+          ...input,
+          winnerId: loserId,
+          loserId: winnerId,
+        },
+        testPool
+      )
+    ).rejects.toMatchObject({
+      statusCode: 409,
+    });
 
-it("should reject the same match ID with different data", async () => {
-  const input = {
-    externalMatchId: "test-match-conflict",
-    leagueId,
-    winnerId,
-    loserId,
-  };
+    const matchResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM match_results
+      WHERE external_match_id = $1
+      `,
+      [input.externalMatchId]
+    );
 
-  // First request: valid match.
-  const firstResult = await reportMatch(input, testPool);
+    expect(matchResult.rows[0].count).toBe(1);
 
-  expect(firstResult.duplicate).toBe(false);
+    const scoreResult = await testPool.query(
+      `
+      SELECT score
+      FROM league_members
+      WHERE league_id = $1
+        AND player_id = $2
+      `,
+      [leagueId, winnerId]
+    );
 
-  // Second request: same external ID, but winner and loser are swapped.
-  await expect(
-    reportMatch(
-      {
-        ...input,
-        winnerId: loserId,
-        loserId: winnerId,
-      },
-      testPool
-    )
-  ).rejects.toMatchObject({
-    statusCode: 409,
+    expect(scoreResult.rows[0].score).toBe(1);
   });
 
-  // Only the original match should exist.
-  const matchResult = await testPool.query(
-    `
-    SELECT COUNT(*)::int AS count
-    FROM match_results
-    WHERE external_match_id = $1
-    `,
-    [input.externalMatchId]
-  );
+  it("should recognize a duplicate report after the league period ends", async () => {
+    const input = {
+      externalMatchId: "test-match-after-period",
+      leagueId,
+      winnerId,
+      loserId,
+    };
 
-  expect(matchResult.rows[0].count).toBe(1);
+    const firstResult = await reportMatch(input, testPool);
 
-  // The original winner should still have exactly one point.
-  const scoreResult = await testPool.query(
-    `
-    SELECT score
-    FROM league_members
-    WHERE league_id = $1 AND player_id = $2
-    `,
-    [leagueId, winnerId]
-  );
+    expect(firstResult.duplicate).toBe(false);
 
-  expect(scoreResult.rows[0].score).toBe(1);
-});
+    await testPool.query(
+      `
+      UPDATE league_periods
+      SET
+        status = 'completed',
+        ends_at = NOW() - INTERVAL '1 hour'
+      WHERE id = $1
+      `,
+      [periodId]
+    );
 
+    const secondResult = await reportMatch(input, testPool);
+
+    expect(secondResult.matchId).toBe(firstResult.matchId);
+    expect(secondResult.duplicate).toBe(true);
+
+    const scoreResult = await testPool.query(
+      `
+      SELECT score
+      FROM league_members
+      WHERE league_id = $1
+        AND player_id = $2
+      `,
+      [leagueId, winnerId]
+    );
+
+    expect(scoreResult.rows[0].score).toBe(1);
+  });
+
+  it("should reject a new match in an inactive league", async () => {
+    await testPool.query(
+      `
+      UPDATE league_periods
+      SET status = 'completed'
+      WHERE id = $1
+      `,
+      [periodId]
+    );
+
+    await expect(
+      reportMatch(
+        {
+          externalMatchId: "test-match-inactive-league",
+          leagueId,
+          winnerId,
+          loserId,
+        },
+        testPool
+      )
+    ).rejects.toMatchObject({
+      statusCode: 404,
+    });
+
+    const matchResult = await testPool.query(
+      `
+      SELECT COUNT(*)::int AS count
+      FROM match_results
+      WHERE external_match_id = $1
+      `,
+      ["test-match-inactive-league"]
+    );
+
+    expect(matchResult.rows[0].count).toBe(0);
+  });
 });

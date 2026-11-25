@@ -1,7 +1,7 @@
 
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
+
 import pool from "../../config/database.js";
-import type { Pool } from "pg";
 import type { ReportMatchInput } from "./match.schema.js";
 
 export class MatchServiceError extends Error {
@@ -20,16 +20,80 @@ interface MatchResult {
   duplicate: boolean;
 }
 
+interface ExistingMatch {
+  id: string;
+  league_id: string;
+  winner_id: string;
+  loser_id: string;
+  status: "reported" | "voided";
+}
+
+async function rollbackSafely(client: PoolClient) {
+  try {
+    await client.query("ROLLBACK");
+  } catch (rollbackError) {
+    console.error("Failed to roll back match report transaction:", rollbackError);
+  }
+}
+
+function validateDuplicate(
+  existingMatch: ExistingMatch,
+  input: ReportMatchInput
+): MatchResult {
+  if (
+    existingMatch.league_id !== input.leagueId ||
+    existingMatch.winner_id !== input.winnerId ||
+    existingMatch.loser_id !== input.loserId
+  ) {
+    throw new MatchServiceError(
+      "Match ID already exists with different data",
+      409
+    );
+  }
+
+  return {
+    matchId: existingMatch.id,
+    status: existingMatch.status,
+    duplicate: true,
+  };
+}
+
 export async function reportMatch(
   input: ReportMatchInput,
   db: Pool = pool
 ): Promise<MatchResult> {
-  const client: PoolClient = await db.connect();
+  const client = await db.connect();
+  let transactionStarted = false;
 
   try {
     await client.query("BEGIN");
+    transactionStarted = true;
 
-    // 1. Check that the league and its period are active.
+    // 1. Check for an existing match before checking league activity.
+    const existingResult = await client.query<ExistingMatch>(
+      `
+      SELECT id, league_id, winner_id, loser_id, status
+      FROM match_results
+      WHERE external_match_id = $1
+      FOR UPDATE
+      `,
+      [input.externalMatchId]
+    );
+
+    const existingMatch = existingResult.rows[0];
+
+    if (existingMatch) {
+      const duplicateResult = validateDuplicate(existingMatch, input);
+
+      await client.query("COMMIT");
+      transactionStarted = false;
+
+      return duplicateResult;
+    }
+
+    // 2. Check that the league and its period are active.
+    // Lock both rows to prevent their lifecycle state changing
+    // before this transaction finishes.
     const leagueResult = await client.query(
       `
       SELECT l.id
@@ -39,18 +103,19 @@ export async function reportMatch(
         AND p.status = 'active'
         AND NOW() >= p.starts_at
         AND NOW() < p.ends_at
+      FOR SHARE OF l, p
       `,
       [input.leagueId]
     );
 
-    if (leagueResult.rowCount === 0) {
+    if (leagueResult.rowCount !== 1) {
       throw new MatchServiceError(
         "League not found or not active",
         404
       );
     }
 
-    // 2. Lock both memberships and verify they belong to this league.
+    // 3. Lock both memberships and verify they belong to this league.
     const membersResult = await client.query(
       `
       SELECT player_id
@@ -70,9 +135,13 @@ export async function reportMatch(
       );
     }
 
-    // 3. Insert the match. The unique external_match_id
-    // prevents the same match from being processed twice.
-    const insertResult = await client.query(
+    // 4. Insert the match.
+    // The unique external_match_id constraint protects against
+    // concurrent duplicate requests.
+    const insertResult = await client.query<{
+      id: string;
+      status: "reported" | "voided";
+    }>(
       `
       INSERT INTO match_results (
         external_match_id,
@@ -88,46 +157,49 @@ export async function reportMatch(
         input.externalMatchId,
         input.leagueId,
         input.winnerId,
-        input.loserId
+        input.loserId,
       ]
     );
 
-    // 4. Handle duplicate requests.
-    if (insertResult.rowCount === 0) {
-      const existingResult = await client.query(
+    // 5. Handle a concurrent request that inserted the same match.
+    if (insertResult.rowCount !== 1) {
+      const concurrentResult = await client.query<ExistingMatch>(
         `
         SELECT id, league_id, winner_id, loser_id, status
         FROM match_results
         WHERE external_match_id = $1
+        FOR UPDATE
         `,
         [input.externalMatchId]
       );
 
-      const existingMatch = existingResult.rows[0];
+      const concurrentMatch = concurrentResult.rows[0];
 
-      if (
-        existingMatch.league_id !== input.leagueId ||
-        existingMatch.winner_id !== input.winnerId ||
-        existingMatch.loser_id !== input.loserId
-      ) {
+      if (!concurrentMatch) {
         throw new MatchServiceError(
-          "Match ID already exists with different data",
+          "Unable to resolve duplicate match report",
           409
         );
       }
 
-      await client.query("COMMIT");
+      const duplicateResult = validateDuplicate(concurrentMatch, input);
 
-      return {
-        matchId: existingMatch.id,
-        status: existingMatch.status,
-        duplicate: true
-      };
+      await client.query("COMMIT");
+      transactionStarted = false;
+
+      return duplicateResult;
     }
 
     const match = insertResult.rows[0];
 
-    // 5. Record the winner's score event.
+    if (!match) {
+      throw new MatchServiceError(
+        "Unable to create match result",
+        500
+      );
+    }
+
+    // 6. Record the winner's score event.
     await client.query(
       `
       INSERT INTO score_events (
@@ -141,8 +213,8 @@ export async function reportMatch(
       [match.id, input.winnerId]
     );
 
-    // 6. Increase the winner's score.
-    await client.query(
+    // 7. Increase the winner's score.
+    const scoreUpdate = await client.query(
       `
       UPDATE league_members
       SET
@@ -150,20 +222,32 @@ export async function reportMatch(
         score_reached_at = NOW()
       WHERE league_id = $1
         AND player_id = $2
+      RETURNING player_id
       `,
       [input.leagueId, input.winnerId]
     );
 
-    // 7. Commit all changes together.
+    if (scoreUpdate.rowCount !== 1) {
+      throw new MatchServiceError(
+        "Unable to update winner score",
+        409
+      );
+    }
+
+    // 8. Commit all changes together.
     await client.query("COMMIT");
+    transactionStarted = false;
 
     return {
       matchId: match.id,
       status: match.status,
-      duplicate: false
+      duplicate: false,
     };
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (transactionStarted) {
+      await rollbackSafely(client);
+    }
+
     throw error;
   } finally {
     client.release();

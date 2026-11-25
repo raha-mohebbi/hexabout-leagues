@@ -27,6 +27,29 @@ export function createReportMatchController(db: Pool = pool) {
         });
       }
 
+      if (!req.player) {
+        return res.status(401).json({
+          success: false,
+          data: null,
+          error: {
+            message: "Authentication required",
+          },
+        });
+      }
+
+      if (
+        req.player.playerId !== validation.data.winnerId &&
+        req.player.playerId !== validation.data.loserId
+      ) {
+        return res.status(403).json({
+          success: false,
+          data: null,
+          error: {
+            message: "Authenticated player must be a match participant",
+          },
+        });
+      }
+
       // Execute business logic using the injected database.
       const result = await reportMatch(validation.data, db);
 
