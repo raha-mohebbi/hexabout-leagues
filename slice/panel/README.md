@@ -1,36 +1,73 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Hexabout Leagues Admin Panel
 
-## Getting Started
+The administrator panel is a Next.js 16 App Router application. It provides
+administrator sign-in, paginated league inspection, leaderboard viewing, and
+match-result invalidation for authorized administrator roles.
 
-First, run the development server:
+## Local setup
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+From `slice/panel`:
+
+1. Copy `.env.example` to `.env.local`.
+2. Set `API_BASE_URL` to the backend origin and set `SESSION_PASSWORD` to a
+   private value with at least 32 characters.
+3. Install dependencies and start the panel:
+
+   ```sh
+   npm ci
+   npm run dev
+   ```
+
+The panel defaults to `http://localhost:3000`; the API default is
+`http://localhost:4000`. Production `API_BASE_URL` values must use HTTPS.
+Do not commit `.env.local` or share the session secret.
+
+## Session and request security
+
+- The browser communicates with same-origin Next.js Route Handlers (the BFF),
+  not directly with the League API.
+- The BFF uses fixed upstream paths, validates request and response data with
+  Zod, applies request timeouts, disables caching, and returns safe error
+  messages.
+- Backend bearer tokens stay in an encrypted `iron-session` cookie configured
+  as HTTP-only, SameSite=Lax, and Secure in production. The cookie lifetime
+  does not exceed the backend session expiry.
+- Login, logout, and invalidation BFF requests must include the same-origin
+  `Origin` header. Protected BFF handlers independently check the session and
+  required role; client-side navigation is not an authorization boundary.
+- The panel confirms the current administrator role with the backend rather
+  than trusting the role sealed into the cookie.
+
+The API's login rate limit is process-local and is not suitable as a
+distributed multi-instance control. The panel does not add a competing local
+rate limiter.
+
+## Features and access
+
+- All authenticated roles can view leagues and leaderboards.
+- `admin` and `superadmin` can invalidate a match result after reviewing a
+  confirmation containing the match ID and reason.
+- `manager` accounts receive read-only access.
+- The API does not expose a match-review queue or match-search endpoint, so
+  the moderation screen requires a known result UUID obtained through an
+  approved operational process.
+
+## Tests and checks
+
+```sh
+npm run typecheck
+npm run lint
+npm test
+npm run build
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Panel tests use Vitest, jsdom, and Testing Library. API integration tests and
+database migrations are maintained in `slice/api/`; they require the dedicated
+`hexabout_leagues_test` database configured by `TEST_DATABASE_URL`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Product and deployment blockers
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The panel does not invent an external player identity provider, wallet
+integration, reward policy, or league lifecycle. Those contracts and business
+rules are still required before player authentication, reward delivery, and
+period finalization, assignment, promotion, or relegation can be completed.
