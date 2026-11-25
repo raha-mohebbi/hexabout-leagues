@@ -1,21 +1,41 @@
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: hexabout-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: hexabout
-      POSTGRES_PASSWORD: hexabout_dev_password
-      POSTGRES_DB: hexabout_leagues
+      POSTGRES_USER: ${POSTGRES_USER:-hexabout}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in slice/api/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-hexabout_leagues}
     ports:
-      - "5433:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+      - ./database/002_test_database.sql:/docker-entrypoint-initdb.d/002_test_database.sql:ro
+      - ./database/migrations/002_league_member_limit.sql:/docker-entrypoint-initdb.d/003_migration_member_limit.sql:ro
+      - ./database/migrations/003_reward_settlements.sql:/docker-entrypoint-initdb.d/004_migration_rewards.sql:ro
+      - ./database/migrations/004_league_listing_indexes.sql:/docker-entrypoint-initdb.d/005_migration_indexes.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hexabout -d hexabout_leagues"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER:-hexabout}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hexabout_leagues}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    ports:
+      - "${API_PORT:-4000}:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
