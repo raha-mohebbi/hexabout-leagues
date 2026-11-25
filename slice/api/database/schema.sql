@@ -69,6 +69,42 @@ CREATE TABLE league_members (
         REFERENCES leagues(id, period_id)
 );
 
+CREATE FUNCTION enforce_league_member_limit()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    member_count INTEGER;
+BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.league_id = OLD.league_id THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM 1
+    FROM leagues
+    WHERE id = NEW.league_id
+    FOR UPDATE;
+
+    SELECT COUNT(*)
+    INTO member_count
+    FROM league_members
+    WHERE league_id = NEW.league_id;
+
+    IF member_count >= 50 THEN
+        RAISE EXCEPTION 'A league cannot contain more than 50 players'
+            USING ERRCODE = '23514',
+                  CONSTRAINT = 'league_member_limit';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER enforce_league_member_limit_trigger
+BEFORE INSERT OR UPDATE OF league_id ON league_members
+FOR EACH ROW
+EXECUTE FUNCTION enforce_league_member_limit();
+
 
 -- =====================================================
 -- 4. Match Results
@@ -111,7 +147,26 @@ CREATE TABLE score_events (
 
 
 -- =====================================================
--- 6. Admin Users
+-- 6. Reward Settlements
+-- =====================================================
+
+CREATE TABLE reward_settlements (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    period_id UUID NOT NULL REFERENCES league_periods(id),
+    player_id UUID NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'processing', 'settled', 'failed')),
+    wallet_reference VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT unique_reward_settlement_per_player
+        UNIQUE (period_id, player_id)
+);
+
+
+-- =====================================================
+-- 7. Admin Users
 -- =====================================================
 
 CREATE TABLE admin_users (
@@ -124,9 +179,33 @@ CREATE TABLE admin_users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE UNIQUE INDEX idx_admin_users_email_lower
+ON admin_users (lower(email));
+
 
 -- =====================================================
--- 7. Admin Audit Logs
+-- 8. Admin Sessions
+-- =====================================================
+
+CREATE TABLE admin_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    admin_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token_hash CHAR(64) NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    revoked_at TIMESTAMPTZ,
+
+    CONSTRAINT valid_admin_session_expiry
+        CHECK (expires_at > created_at)
+);
+
+CREATE INDEX idx_admin_sessions_active
+ON admin_sessions (admin_id, expires_at)
+WHERE revoked_at IS NULL;
+
+
+-- =====================================================
+-- 9. Admin Audit Logs
 -- =====================================================
 
 CREATE TABLE admin_audit_logs (
@@ -142,7 +221,7 @@ CREATE TABLE admin_audit_logs (
 
 
 -- =====================================================
--- 8. Indexes
+-- 10. Indexes
 -- =====================================================
 
 -- Leaderboard sorting
@@ -161,6 +240,12 @@ ON leagues (
     created_at DESC,
     id DESC
 );
+
+CREATE INDEX idx_leagues_created
+ON leagues (created_at DESC, id DESC);
+
+CREATE INDEX idx_league_members_player_joined
+ON league_members (player_id, joined_at DESC, league_id DESC);
 
 -- Match lookup by league
 CREATE INDEX idx_match_results_league_reported
