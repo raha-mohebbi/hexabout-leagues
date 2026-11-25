@@ -1,15 +1,19 @@
 import type { Metadata } from "next";
+import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Hexabout Leagues",
-  description: "League management and leaderboard platform",
+  title: {
+    default: "Hexabout Leagues | Admin",
+    template: "%s | Hexabout Admin",
+  },
+  description: "League operations and match moderation",
 };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className="h-full antialiased">
-      <body className="min-h-full flex flex-col">{children}</body>
+    <html lang="en">
+      <body>{children}</body>
     </html>
   );
 }
