@@ -14,11 +14,26 @@ import {
 
 import testPool from "../../src/config/test-database.js";
 import { createLeaderboardRouter } from "../../src/modules/leaderboard/leaderboard.routes.js";
+import {
+  InvalidPlayerTokenError,
+} from "../../src/modules/player-auth/player-auth.js";
 
+const playerId = "33333333-3333-4333-8333-333333333333";
+const testPlayerVerifier = {
+  async verify(token: string) {
+    if (token !== "test-player-token") {
+      throw new InvalidPlayerTokenError();
+    }
+    return { playerId };
+  },
+};
 const app = express();
 
 app.use(express.json());
-app.use("/api/v1/leagues", createLeaderboardRouter(testPool));
+app.use(
+  "/api/v1/leagues",
+  createLeaderboardRouter(testPool, testPlayerVerifier)
+);
 
 let periodId: string;
 let leagueId: string;
@@ -134,7 +149,7 @@ describe("Leaderboard API", () => {
 
     const response = await request(app).get(
       `/api/v1/leagues/${leagueId}/leaderboard`
-    );
+    ).set("Authorization", "Bearer test-player-token");
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
@@ -166,7 +181,7 @@ describe("Leaderboard API", () => {
   });
 
   it("returns no more than 50 players", async () => {
-    const members = Array.from({ length: 55 }, (_, index) => ({
+    const members = Array.from({ length: 50 }, (_, index) => ({
       playerId: `00000000-0000-4000-8000-${(index + 1)
         .toString(16)
         .padStart(12, "0")}`,
@@ -178,26 +193,79 @@ describe("Leaderboard API", () => {
 
     const response = await request(app).get(
       `/api/v1/leagues/${leagueId}/leaderboard`
-    );
+    ).set("Authorization", "Bearer test-player-token");
 
     expect(response.status).toBe(200);
     expect(response.body.data).toHaveLength(50);
     expect(response.body.data[0]).toEqual({
       rank: 1,
-      playerId: "00000000-0000-4000-8000-000000000037",
-      score: 55,
+      playerId: "00000000-0000-4000-8000-000000000032",
+      score: 50,
     });
     expect(response.body.data[49]).toEqual({
       rank: 50,
-      playerId: "00000000-0000-4000-8000-000000000006",
-      score: 6,
+      playerId: "00000000-0000-4000-8000-000000000001",
+      score: 1,
     });
+
+    await expect(
+      testPool.query(
+        `
+        INSERT INTO league_members (
+          league_id, period_id, player_id, score, score_reached_at
+        )
+        VALUES ($1, $2, $3, 0, NOW())
+        `,
+        [
+          leagueId,
+          periodId,
+          "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        ]
+      )
+    ).rejects.toMatchObject({
+      constraint: "league_member_limit",
+    });
+  });
+
+  it("enforces the 50-player cap during concurrent membership writes", async () => {
+    const members = Array.from({ length: 49 }, (_, index) => ({
+      playerId: `10000000-0000-4000-8000-${(index + 1)
+        .toString(16)
+        .padStart(12, "0")}`,
+      score: 0,
+      scoreReachedAt: null,
+    }));
+
+    await createMembers(members);
+
+    const insert = (playerId: string) =>
+      testPool.query(
+        `
+        INSERT INTO league_members (league_id, period_id, player_id)
+        VALUES ($1, $2, $3)
+        `,
+        [leagueId, periodId, playerId]
+      );
+
+    const results = await Promise.allSettled([
+      insert("20000000-0000-4000-8000-000000000001"),
+      insert("20000000-0000-4000-8000-000000000002"),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+    const count = await testPool.query(
+      "SELECT COUNT(*)::int AS count FROM league_members WHERE league_id = $1",
+      [leagueId]
+    );
+    expect(count.rows[0].count).toBe(50);
   });
 
   it("returns 404 when the league does not exist", async () => {
     const response = await request(app).get(
       `/api/v1/leagues/${randomUUID()}/leaderboard`
-    );
+    ).set("Authorization", "Bearer test-player-token");
 
     expect(response.status).toBe(404);
     expect(response.body).toEqual({
@@ -212,7 +280,7 @@ describe("Leaderboard API", () => {
   it("returns an empty array when the league has no members", async () => {
     const response = await request(app).get(
       `/api/v1/leagues/${leagueId}/leaderboard`
-    );
+    ).set("Authorization", "Bearer test-player-token");
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
@@ -225,7 +293,7 @@ describe("Leaderboard API", () => {
   it("returns 400 when the league ID is not a UUID", async () => {
     const response = await request(app).get(
       "/api/v1/leagues/not-a-uuid/leaderboard"
-    );
+    ).set("Authorization", "Bearer test-player-token");
 
     expect(response.status).toBe(400);
     expect(response.body.success).toBe(false);
