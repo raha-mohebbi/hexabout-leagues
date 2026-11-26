@@ -246,19 +246,6 @@ The development process reinforced several important principles:
 - Performance estimates must never be presented as benchmark results.
 - AI can accelerate implementation, but engineering responsibility remains with the developer.
 
-## 10. Future Improvements
-
-For future development iterations, the following improvements are recommended:
-
-- Maintain a more detailed time and AI-usage log.
-- Record important prompts and rejected suggestions as development progresses.
-- Expand automated tests for authorization and edge cases.
-- Add integration tests for external service contracts when available.
-- Execute reproducible load tests before making performance claims.
-- Review security controls before production deployment.
-- Keep architecture and operational documentation synchronized with implementation changes.
-
----
 
 **Final Note**
 
